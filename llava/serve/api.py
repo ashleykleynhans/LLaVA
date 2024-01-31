@@ -17,7 +17,7 @@ from llava.mm_utils import process_images, tokenizer_image_token, get_model_name
 
 disable_torch_init()
 
-INITIAL_MODEL_PATH = 'liuhaotian/llava-v1.5-7b'
+INITIAL_MODEL_PATH = 'liuhaotian/llava-v1.6-mistral-7b'
 CURRENT_MODEL_PATH = INITIAL_MODEL_PATH
 MODEL_BASE = None
 LOAD_4BIT = False

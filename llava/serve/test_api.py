@@ -4,7 +4,7 @@ import requests
 import base64
 
 
-BASE_URI = 'https://b7jx50f8adg41e-5000.proxy.runpod.net'
+BASE_URI = 'http://127.0.0.1:5000'
 STREAM = True
 
 
@@ -27,7 +27,7 @@ def encode_image_to_base64(image_path):
 
 if __name__ == '__main__':
     payload = {
-        'model_path': 'liuhaotian/llava-v1.5-7b',
+        'model_path': 'liuhaotian/llava-v1.6-mistral-7b',
         'image_base64': encode_image_to_base64('examples/waterview.jpg'),
         'prompt': 'What are the things I should be cautious about when I visit here?',
         'temperature': 0.2,
