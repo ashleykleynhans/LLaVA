@@ -144,8 +144,7 @@ def add_text(state, text, image, image_process_mode, request: gr.Request):
             # text = '<Image><image></Image>' + text
             text = text + '\n<image>'
         text = (text, image, image_process_mode)
-        if len(state.get_images(return_pil=True)) > 0:
-            state = default_conversation.copy()
+        state = default_conversation.copy()
     state.append_message(state.roles[0], text)
     state.append_message(state.roles[1], None)
     state.skip_next = False
@@ -438,7 +437,7 @@ def build_demo(embed_mode, cur_dir=None, concurrency_count=10):
                 load_demo,
                 [url_params],
                 [state, model_selector],
-                _js=get_window_url_params
+                js=get_window_url_params
             )
         elif args.model_list_mode == "reload":
             demo.load(
