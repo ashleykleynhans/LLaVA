@@ -5,15 +5,15 @@ import base64
 import torch
 from PIL import Image
 from io import BytesIO
-from transformers import TextIteratorStreamer
+from transformers import TextStreamer, TextIteratorStreamer
 from flask import Flask, request, jsonify, make_response, stream_with_context
 from threading import Thread
 
 from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
-from llava.conversation import conv_templates, SeparatorStyle
+from llava.conversation import conv_templates
 from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
-from llava.mm_utils import process_images, tokenizer_image_token, get_model_name_from_path, KeywordsStoppingCriteria
+from llava.mm_utils import process_images, tokenizer_image_token, get_model_name_from_path
 
 disable_torch_init()
 
@@ -80,16 +80,16 @@ def load_image_from_base64(base64_str: str):
     return image
 
 
-def generate_wrapper(input_ids, image_tensor, temperature, max_new_tokens, streamer, stopping_criteria):
+def generate_wrapper(input_ids, image_tensor, image_size, temperature, max_new_tokens, streamer):
     return model.generate(
         input_ids,
         images=image_tensor,
-        do_sample=True,
+        image_sizes=[image_size],
+        do_sample=True if temperature > 0 else False,
         temperature=temperature,
         max_new_tokens=max_new_tokens,
         streamer=streamer,
-        use_cache=True,
-        stopping_criteria=stopping_criteria
+        use_cache=True
     )
 
 
@@ -136,46 +136,42 @@ def run_inference(data: dict, current_model_path: str, tokenizer, model, image_p
 
     image = load_image_from_base64(data['image_base64'])
     image_tensor = process_images([image], image_processor, DictToObject(data))
+    image_size = image.size
 
     if type(image_tensor) is list:
         image_tensor = [image.to(model.device, dtype=torch.float16) for image in image_tensor]
     else:
         image_tensor = image_tensor.to(model.device, dtype=torch.float16)
 
-    inp = data['prompt']
+    prompt = data['prompt']
 
     if image is not None:
         # first message
         if model.config.mm_use_im_start_end:
-            inp = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + inp
+            prompt = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + prompt
         else:
-            inp = DEFAULT_IMAGE_TOKEN + '\n' + inp
-        conv.append_message(conv.roles[0], inp)
+            prompt = DEFAULT_IMAGE_TOKEN + '\n' + prompt
+        conv.append_message(conv.roles[0], prompt)
         image = None
     else:
         # later messages
-        conv.append_message(conv.roles[0], inp)
+        conv.append_message(conv.roles[0], prompt)
 
-    conv.append_message(conv.roles[1], None)
+    conv.append_message(conv.roles[1], prompt)
     prompt = conv.get_prompt()
-
     input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
-    stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
-    keywords = [stop_str]
-    stopping_criteria = KeywordsStoppingCriteria(keywords, tokenizer, input_ids)
 
     if data['stream']:
         streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
-
         thread = Thread(
             target=generate_wrapper,
             args=(
                 input_ids,
                 image_tensor,
+                image_size,
                 data['temperature'],
                 data['max_new_tokens'],
-                streamer,
-                [stopping_criteria]
+                streamer
             )
         )
 
@@ -185,20 +181,20 @@ def run_inference(data: dict, current_model_path: str, tokenizer, model, image_p
             yield f'{new_text}\n\n'
             sys.stdout.flush()
     else:
-        streamer = None
+        streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
 
         with torch.inference_mode():
             output_ids = generate_wrapper(
                 input_ids,
                 image_tensor,
+                image_size,
                 data['temperature'],
                 data['max_new_tokens'],
-                streamer,
-                [stopping_criteria]
+                streamer
             )
 
         # Decode the tensor to string
-        outputs = tokenizer.decode(output_ids[0, input_ids.shape[1]:], skip_special_tokens=True).strip()
+        outputs = tokenizer.decode(output_ids[0]).strip()
         conv.messages[-1][-1] = outputs
         yield outputs
 
