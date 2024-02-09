@@ -1,3 +1,4 @@
+import os
 import sys
 import argparse
 import requests
@@ -5,7 +6,7 @@ import base64
 import torch
 from PIL import Image
 from io import BytesIO
-from transformers import TextStreamer, TextIteratorStreamer
+from transformers.generation.streamers import TextStreamer, TextIteratorStreamer
 from flask import Flask, request, jsonify, make_response, stream_with_context
 from threading import Thread
 
@@ -17,7 +18,8 @@ from llava.mm_utils import process_images, tokenizer_image_token, get_model_name
 
 disable_torch_init()
 
-INITIAL_MODEL_PATH = 'liuhaotian/llava-v1.6-mistral-7b'
+DEFAULT_MODEL = 'liuhaotian/llava-v1.6-mistral-7b'
+INITIAL_MODEL_PATH = os.getenv('MODEL', DEFAULT_MODEL)
 CURRENT_MODEL_PATH = INITIAL_MODEL_PATH
 MODEL_BASE = None
 LOAD_4BIT = False
@@ -36,12 +38,6 @@ tokenizer, model, image_processor, context_len = load_pretrained_model(
 )
 
 app = Flask(__name__)
-
-
-class DictToObject:
-    def __init__(self, dictionary):
-        for key, value in dictionary.items():
-            setattr(self, key, value)
 
 
 def get_args():
@@ -93,11 +89,13 @@ def generate_wrapper(input_ids, image_tensor, image_size, temperature, max_new_t
     )
 
 
-def run_inference(data: dict, current_model_path: str, tokenizer, model, image_processor, context_len):
+def run_inference(data: dict):
+    global CURRENT_MODEL_PATH, tokenizer, model, image_processor, context_len
+
     model_path = data.get('model_path')
     model_name = get_model_name_from_path(model_path)
 
-    if current_model_path != model_path:
+    if model_path != CURRENT_MODEL_PATH:
         CURRENT_MODEL_PATH = model_path
 
         tokenizer, model, image_processor, context_len = load_pretrained_model(
@@ -111,6 +109,10 @@ def run_inference(data: dict, current_model_path: str, tokenizer, model, image_p
 
     if 'llama-2' in model_name.lower():
         conv_mode = 'llava_llama_2'
+    elif 'mistral' in model_name.lower():
+        conv_mode = 'mistral_instruct'
+    elif 'v1.6-34b' in model_name.lower():
+        conv_mode = 'chatml_direct'
     elif 'v1' in model_name.lower():
         conv_mode = 'llava_v1'
     elif 'mpt' in model_name.lower():
@@ -128,15 +130,9 @@ def run_inference(data: dict, current_model_path: str, tokenizer, model, image_p
         data['conv_mode'] = conv_mode
 
     conv = conv_templates[data['conv_mode']].copy()
-
-    if 'mpt' in model_name.lower():
-        roles = ('user', 'assistant')
-    else:
-        roles = conv.roles
-
     image = load_image_from_base64(data['image_base64'])
-    image_tensor = process_images([image], image_processor, DictToObject(data))
     image_size = image.size
+    image_tensor = process_images([image], image_processor, model.config)
 
     if type(image_tensor) is list:
         image_tensor = [image.to(model.device, dtype=torch.float16) for image in image_tensor]
@@ -157,12 +153,12 @@ def run_inference(data: dict, current_model_path: str, tokenizer, model, image_p
         # later messages
         conv.append_message(conv.roles[0], prompt)
 
-    conv.append_message(conv.roles[1], prompt)
+    conv.append_message(conv.roles[1], None)
     prompt = conv.get_prompt()
-    input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
+    input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).to(model.device)
 
     if data['stream']:
-        streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+        streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True, timeout=20.0)
         thread = Thread(
             target=generate_wrapper,
             args=(
@@ -253,32 +249,18 @@ def process_image():
         if stream:
             response = make_response(
                 stream_with_context(
-                    run_inference(
-                        data,
-                        CURRENT_MODEL_PATH,
-                        tokenizer,
-                        model,
-                        image_processor,
-                        context_len
-                    )
+                    run_inference(data)
                 )
             )
             response.headers['Content-Type'] = 'text/event-stream'
             return response
         else:
-            outputs = run_inference(
-                data,
-                CURRENT_MODEL_PATH,
-                tokenizer,
-                model,
-                image_processor,
-                context_len
-            )
+            outputs = run_inference(data)
 
             return make_response(jsonify(
                 {
                     'status': 'ok',
-                    'response': '\n'.join([output.replace('</s>', '') for output in outputs])
+                    'response': '\n'.join([output.replace('<s>', '').replace('</s>', '').strip() for output in outputs])
                 }
             ), 200)
     except Exception as e:
